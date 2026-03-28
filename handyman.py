@@ -36,12 +36,23 @@ def is_handyman_enabled() -> bool:
     return _env_flag("USE_HANDYMAN", "true")
 
 
-def is_verify_enabled() -> bool:
-    return is_handyman_enabled() and _env_flag("USE_HANDYMAN_VERIFY", "true")
-
-
 def _collapse_blank_lines(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _normalize_for_match(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+def _has_normalized_match(needle: str, haystack: str) -> bool:
+    normalized_needle = _normalize_for_match(needle)
+    normalized_haystack = _normalize_for_match(haystack)
+    return bool(normalized_needle) and normalized_needle in normalized_haystack
+
+
+def _has_duplicate_values(values: list[str]) -> bool:
+    normalized = [_normalize_for_match(value) for value in values if _normalize_for_match(value)]
+    return len(normalized) != len(set(normalized))
 
 
 def rules_prune(markdown_text: str) -> str:
@@ -209,28 +220,31 @@ async def handyman_extract(url: str, markdown_text: str) -> DentalProduct | None
 
 
 async def handyman_verify_extraction(url: str, markdown_text: str, product: DentalProduct) -> HandymanVerifyResult:
-    page = (markdown_text or "").lower()
-    issues: list[str] = []
+    page = markdown_text or ""
+    hard_issues: list[str] = []
+    soft_issues: list[str] = []
 
-    if product.product_name and product.product_name.lower() not in page:
-        issues.append("product_name not directly found in page text (possible hallucination)")
+    if product.product_name and len(_normalize_for_match(product.product_name)) >= 6 and not _has_normalized_match(product.product_name, page):
+        soft_issues.append("product_name not directly supported by normalized page text")
     if not product.category_hierarchy:
-        issues.append("missing category hierarchy")
+        soft_issues.append("missing category hierarchy")
 
     # Check for hallucinated SKUs (hard signal — SKU should appear on page)
     for variation in product.variations:
-        if variation.sku and variation.sku.lower() not in page:
-            issues.append(f"sku {variation.sku} not found in page text (possible hallucination)")
+        if variation.sku and len(_normalize_for_match(variation.sku)) >= 4 and not _has_normalized_match(variation.sku, page):
+            hard_issues.append(f"sku {variation.sku} not directly supported by normalized page text")
 
     # Check for duplicate/repeated values (structural error)
     for field_name, field_val in [("category_hierarchy", product.category_hierarchy), ("alternative_products", product.alternative_products)]:
-        if len(field_val) != len(set(field_val)):
-            issues.append(f"repeated duplicate values in {field_name}")
+        if _has_duplicate_values(field_val):
+            hard_issues.append(f"repeated duplicate values in {field_name}")
+
+    issues = list(dict.fromkeys([*hard_issues, *soft_issues]))
 
     if issues:
         baseline = HandymanVerifyResult(
-            decision="warn" if len(issues) <= 2 else "fail",
-            confidence=0.7 if len(issues) <= 2 else 0.82,
+            decision="fail" if hard_issues or len(soft_issues) >= 3 else "warn",
+            confidence=0.82 if hard_issues or len(soft_issues) >= 3 else 0.7,
             issues=issues,
             notes="rule-based verification found unsupported or missing fields",
         )

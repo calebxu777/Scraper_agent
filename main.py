@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -25,7 +26,6 @@ from handyman import (
     handyman_verify_extraction,
     handyman_fix,
     is_handyman_enabled,
-    is_verify_enabled,
 )
 from llm_workers import api_extract_product, api_fix_product, api_recover_variations, api_verify_product
 from navigator import fetch_page
@@ -214,6 +214,27 @@ def build_fix_issue_list(verification_issues: list[str], rejection_issues: list[
     return list(dict.fromkeys([*verification_issues, *rejection_issues]))
 
 
+HARD_VERIFICATION_MARKERS = (
+    "duplicate sku",
+    "duplicate skus",
+    "conflicting",
+    "placeholder sku",
+    "suspiciously short sku",
+    "synthetic q1",
+    "synthesized",
+    "derived from product title",
+    "repeated duplicate values",
+    "listing page",
+    "not a product",
+)
+
+
+def has_hard_verification_issues(verification) -> bool:
+    texts = [verification.notes, *(verification.issues or [])]
+    lowered = " ".join(text.lower() for text in texts if text)
+    return any(marker in lowered for marker in HARD_VERIFICATION_MARKERS)
+
+
 HARD_REJECTION_ISSUES = {
     "utility/category url should not be saved as product",
     "non-product site page should not be saved as product",
@@ -283,6 +304,25 @@ def mark_product_quality(product_data, incomplete_issues: list[str]) -> None:
         product_data.quality_notes = []
 
 
+def build_business_product_payload(product_data) -> dict:
+    specifications = {
+        spec.name: spec.value
+        for spec in (product_data.specifications or [])
+        if getattr(spec, "name", None) and getattr(spec, "value", None)
+    }
+    return {
+        "product_name": product_data.product_name,
+        "brand": product_data.brand,
+        "category_hierarchy": list(product_data.category_hierarchy or []),
+        "description": product_data.description,
+        "specifications": specifications,
+        "variations": [variation.model_dump() for variation in product_data.variations],
+        "image_urls": list(product_data.image_urls or []),
+        "alternative_products": list(product_data.alternative_products or []),
+        "source_url": product_data.source_url,
+    }
+
+
 async def persist_product_record(
     url: str,
     product_data,
@@ -293,9 +333,14 @@ async def persist_product_record(
 ):
     issues = list(dict.fromkeys(issues or []))
     mark_product_quality(product_data, issues)
+    business_payload = build_business_product_payload(product_data)
     await save_product(
         url,
-        product_data.model_dump_json(),
+        json.dumps(business_payload, ensure_ascii=False),
+        extraction_method=product_data.extraction_method,
+        extraction_latency=product_data.extraction_latency,
+        quality_status=product_data.quality_status,
+        quality_notes_json=json.dumps(product_data.quality_notes, ensure_ascii=False),
         record_status=record_status,
         queue_status=queue_status,
         detail=detail,
@@ -398,39 +443,38 @@ async def process_url(
                 
                 if product_data:
                     product_data.extraction_latency = round(time.time() - local_start, 2)
-                    if is_verify_enabled():
+                    verification = await handyman_verify_extraction(url, cleaned_md, product_data)
+                    rejection_issues = collect_rejection_issues(url, cleaned_md, product_data, seed_scope_terms=seed_scope_terms)
+                    
+                    fix_attempts = 0
+                    while (verification.decision == "fail" or rejection_issues) and fix_attempts < 3:
+                        fix_issues = build_fix_issue_list(verification.issues, rejection_issues)
+                        logging.warning(
+                            f"Handyman Extraction needs repair {fix_attempts+1}/3. "
+                            f"Validation={verification.decision}. Issues: {fix_issues or [verification.notes]}"
+                        )
+                        fix_start = time.time()
+                        fixed_data = await handyman_fix(url, cleaned_md, product_data, fix_issues or [verification.notes])
+                        if not fixed_data:
+                            logging.warning("Handyman fix hallucinated, aborting recursion.")
+                            break
+                        
+                        product_data = fixed_data
+                        product_data.extraction_latency += round(time.time() - fix_start, 2)
+                        
                         verification = await handyman_verify_extraction(url, cleaned_md, product_data)
                         rejection_issues = collect_rejection_issues(url, cleaned_md, product_data, seed_scope_terms=seed_scope_terms)
-                        
-                        fix_attempts = 0
-                        while (verification.decision == "fail" or rejection_issues) and fix_attempts < 3:
-                            fix_issues = build_fix_issue_list(verification.issues, rejection_issues)
-                            logging.warning(
-                                f"Handyman Extraction needs repair {fix_attempts+1}/3. "
-                                f"Validation={verification.decision}. Issues: {fix_issues or [verification.notes]}"
-                            )
-                            fix_start = time.time()
-                            fixed_data = await handyman_fix(url, cleaned_md, product_data, fix_issues or [verification.notes])
-                            if not fixed_data:
-                                logging.warning("Handyman fix hallucinated, aborting recursion.")
-                                break
-                            
-                            product_data = fixed_data
-                            product_data.extraction_latency += round(time.time() - fix_start, 2)
-                            
-                            verification = await handyman_verify_extraction(url, cleaned_md, product_data)
-                            rejection_issues = collect_rejection_issues(url, cleaned_md, product_data, seed_scope_terms=seed_scope_terms)
-                            fix_attempts += 1
+                        fix_attempts += 1
 
-                        if verification.decision == "fail" or rejection_issues:
-                            combined_issues = build_fix_issue_list(verification.issues, rejection_issues)
-                            logging.warning(
-                                f"Handyman Local Extraction irreparably failed quality checks. "
-                                f"Escalating to API. Issues: {combined_issues or [verification.notes]}"
-                            )
-                            product_data = None
-                        elif verification.decision == "warn":
-                            logging.warning(f"Handyman Local Extraction warning after {fix_attempts} fixes: {verification.notes}")
+                    if verification.decision == "fail" or rejection_issues:
+                        combined_issues = build_fix_issue_list(verification.issues, rejection_issues)
+                        logging.warning(
+                            f"Handyman Local Extraction irreparably failed quality checks. "
+                            f"Escalating to API. Issues: {combined_issues or [verification.notes]}"
+                        )
+                        product_data = None
+                    elif verification.decision == "warn":
+                        logging.warning(f"Handyman Local Extraction warning after {fix_attempts} fixes: {verification.notes}")
                 
                 # Escalation fallback
                 if not product_data:
@@ -448,19 +492,15 @@ async def process_url(
                 product_data.extraction_method = "api_gpt4o_mini"
                 product_data.extraction_latency = round(time.time() - api_start, 2)
 
-                # Always run rule-based validation in API mode
+                # Keep the older, more permissive acceptance behavior:
+                # rule verification remains the gate, while API verification is advisory unless it finds hard failures.
                 verification = await handyman_verify_extraction(url, cleaned_md, product_data)
-
-                # If USE_HANDYMAN_VERIFY=true, also run LLM-based API validation
-                use_verify = os.getenv("USE_HANDYMAN_VERIFY", "true").lower() == "true"
-                if use_verify:
-                    logging.info(f"Running API-based LLM validation for {url}")
-                    api_verification = await api_verify_product(cleaned_md, product_data)
-                    # API LLM verdict overrides rule-based if it's stricter
-                    if api_verification.decision == "fail" or verification.decision == "fail":
-                        verification = api_verification if api_verification.decision == "fail" else verification
-                    elif api_verification.decision == "warn":
-                        verification = api_verification
+                logging.info(f"Running API-based validation for {url}")
+                api_verification = await api_verify_product(cleaned_md, product_data)
+                if api_verification.decision == "warn":
+                    verification = api_verification
+                elif api_verification.decision == "fail" and has_hard_verification_issues(api_verification):
+                    verification = api_verification
 
                 rejection_issues = collect_rejection_issues(url, cleaned_md, product_data, seed_scope_terms=seed_scope_terms)
                 should_try_api_fix = verification.decision == "fail" or bool(rejection_issues)
@@ -475,13 +515,12 @@ async def process_url(
                     product_data = fixed_product
 
                     verification = await handyman_verify_extraction(url, cleaned_md, product_data)
-                    if use_verify:
-                        logging.info(f"Re-running API-based LLM validation after fix for {url}")
-                        api_verification = await api_verify_product(cleaned_md, product_data)
-                        if api_verification.decision == "fail" or verification.decision == "fail":
-                            verification = api_verification if api_verification.decision == "fail" else verification
-                        elif api_verification.decision == "warn":
-                            verification = api_verification
+                    logging.info(f"Re-running API-based validation after fix for {url}")
+                    api_verification = await api_verify_product(cleaned_md, product_data)
+                    if api_verification.decision == "warn":
+                        verification = api_verification
+                    elif api_verification.decision == "fail" and has_hard_verification_issues(api_verification):
+                        verification = api_verification
 
                 if verification.decision == "fail":
                     failure_issues = verification.issues or [verification.notes]

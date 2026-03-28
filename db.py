@@ -1,4 +1,5 @@
 import aiosqlite
+import json
 import os
 from datetime import datetime, timezone
 
@@ -38,16 +39,49 @@ async def init_db():
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS products (
                 source_url TEXT PRIMARY KEY,
+                product_name TEXT,
+                brand TEXT,
+                category_hierarchy_json TEXT,
+                description TEXT,
+                specifications_json TEXT,
+                image_urls_json TEXT,
+                alternative_products_json TEXT,
                 product_data TEXT, -- JSON payload of the DentalProduct
                 extracted_at TIMESTAMP,
+                extraction_method TEXT,
+                extraction_latency REAL,
+                quality_status TEXT,
+                quality_notes TEXT,
                 record_status TEXT DEFAULT 'complete',
                 queue_status TEXT DEFAULT 'COMPLETED',
                 detail TEXT,
                 last_error TEXT
             )
         ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS product_variations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_url TEXT NOT NULL,
+                sku TEXT,
+                size TEXT,
+                package_count TEXT,
+                price REAL,
+                availability INTEGER
+            )
+        ''')
         await _ensure_column(conn, "pages_queue", "detail", "TEXT")
         await _ensure_column(conn, "pages_queue", "last_error", "TEXT")
+        await _ensure_column(conn, "products", "product_name", "TEXT")
+        await _ensure_column(conn, "products", "brand", "TEXT")
+        await _ensure_column(conn, "products", "category_hierarchy_json", "TEXT")
+        await _ensure_column(conn, "products", "description", "TEXT")
+        await _ensure_column(conn, "products", "specifications_json", "TEXT")
+        await _ensure_column(conn, "products", "image_urls_json", "TEXT")
+        await _ensure_column(conn, "products", "alternative_products_json", "TEXT")
+        await _ensure_column(conn, "products", "extraction_method", "TEXT")
+        await _ensure_column(conn, "products", "extraction_latency", "REAL")
+        await _ensure_column(conn, "products", "quality_status", "TEXT")
+        await _ensure_column(conn, "products", "quality_notes", "TEXT")
         await _ensure_column(conn, "products", "record_status", "TEXT DEFAULT 'complete'")
         await _ensure_column(conn, "products", "queue_status", "TEXT DEFAULT 'COMPLETED'")
         await _ensure_column(conn, "products", "detail", "TEXT")
@@ -111,18 +145,70 @@ async def update_status(url: str, status: str, increment_retry: bool = False, de
 async def save_product(
     url: str,
     product_data_json: str,
+    extraction_method: str | None = None,
+    extraction_latency: float | None = None,
+    quality_status: str | None = None,
+    quality_notes_json: str | None = None,
     record_status: str = "complete",
     queue_status: str = "COMPLETED",
     detail: str | None = None,
     error: str | None = None,
 ):
     async with get_connection() as conn:
+        payload = json.loads(product_data_json)
+        product_name = payload.get("product_name")
+        brand = payload.get("brand")
+        category_hierarchy_json = json.dumps(payload.get("category_hierarchy", []), ensure_ascii=False)
+        description_value = payload.get("description")
+        specifications_json = json.dumps(payload.get("specifications", {}), ensure_ascii=False)
+        image_urls_json = json.dumps(payload.get("image_urls", []), ensure_ascii=False)
+        alternative_products_json = json.dumps(payload.get("alternative_products", []), ensure_ascii=False)
+
         await conn.execute('''
             INSERT OR REPLACE INTO products (
-                source_url, product_data, extracted_at, record_status, queue_status, detail, last_error
+                source_url, product_name, brand, category_hierarchy_json, description,
+                specifications_json, image_urls_json, alternative_products_json,
+                product_data, extracted_at,
+                extraction_method, extraction_latency, quality_status, quality_notes,
+                record_status, queue_status, detail, last_error
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (url, product_data_json, current_timestamp(), record_status, queue_status, detail, error))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            url,
+            product_name,
+            brand,
+            category_hierarchy_json,
+            description_value,
+            specifications_json,
+            image_urls_json,
+            alternative_products_json,
+            product_data_json,
+            current_timestamp(),
+            extraction_method,
+            extraction_latency,
+            quality_status,
+            quality_notes_json,
+            record_status,
+            queue_status,
+            detail,
+            error,
+        ))
+
+        await conn.execute("DELETE FROM product_variations WHERE source_url = ?", (url,))
+        for variation in payload.get("variations", []) or []:
+            availability = variation.get("availability")
+            await conn.execute('''
+                INSERT INTO product_variations (source_url, sku, size, package_count, price, availability)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                url,
+                variation.get("sku"),
+                variation.get("size"),
+                variation.get("package_count"),
+                variation.get("price"),
+                None if availability is None else int(bool(availability)),
+            ))
+
         # Keep queue status aligned with the saved record outcome.
         await conn.execute('''
             UPDATE pages_queue
@@ -192,7 +278,10 @@ async def get_products(limit: int | None = None, include_incomplete: bool = Fals
     async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         query = '''
-            SELECT source_url, product_data, extracted_at, record_status, queue_status, detail, last_error
+            SELECT
+                source_url, product_data, extracted_at,
+                extraction_method, extraction_latency, quality_status, quality_notes,
+                record_status, queue_status, detail, last_error
             FROM products
         '''
         params_list: list = []

@@ -1,5 +1,6 @@
 import os
 import asyncio
+import sqlite3
 import unittest
 from pathlib import Path
 
@@ -47,7 +48,11 @@ class DatabaseQueueTests(unittest.TestCase):
             await db.add_to_queue("https://example.com/p1", "PRODUCT")
             await db.save_product(
                 "https://example.com/p1",
-                '{"product_name":"Example","source_url":"https://example.com/p1","variations":[]}',
+                '{"product_name":"Example","source_url":"https://example.com/p1","specifications":{"Material":"Nitrile"},"variations":[{"sku":"ABC123","size":"M","package_count":"Box of 100","price":12.5,"availability":true}]}',
+                extraction_method="api_gpt4o_mini",
+                extraction_latency=1.23,
+                quality_status="incomplete",
+                quality_notes_json='["missing price"]',
                 record_status="incomplete",
                 queue_status="FAILED",
                 detail="saved incomplete product record",
@@ -61,6 +66,21 @@ class DatabaseQueueTests(unittest.TestCase):
             self.assertEqual(len(all_products), 1)
             self.assertEqual(all_products[0]["record_status"], "incomplete")
             self.assertEqual(all_products[0]["queue_status"], "FAILED")
+
+            conn = sqlite3.connect(self.db_path)
+            product_row = conn.execute(
+                "SELECT product_name, brand, category_hierarchy_json, specifications_json FROM products WHERE source_url = ?",
+                ("https://example.com/p1",),
+            ).fetchone()
+            variation_row = conn.execute(
+                "SELECT sku, size, package_count, price, availability FROM product_variations WHERE source_url = ?",
+                ("https://example.com/p1",),
+            ).fetchone()
+            conn.close()
+            self.assertEqual(product_row[0], "Example")
+            self.assertIsNone(product_row[1])
+            self.assertEqual(product_row[3], '{"Material": "Nitrile"}')
+            self.assertEqual(variation_row, ("ABC123", "M", "Box of 100", 12.5, 1))
 
         asyncio.run(run())
 

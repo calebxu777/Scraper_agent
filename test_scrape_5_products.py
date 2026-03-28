@@ -9,6 +9,16 @@ from db import get_products
 from main import worker_loop
 
 
+def _load_json_list(value):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return [str(value)]
+
+
 def main():
     load_dotenv()
     use_handyman = os.getenv("USE_HANDYMAN", "true").lower() == "true"
@@ -23,7 +33,14 @@ def main():
 
     products = asyncio.run(get_products(limit=max_products, include_incomplete=True))
     export_path = artifacts_dir / f"scrape_{max_products}_products.json"
-    parsed_products = [json.loads(row["product_data"]) for row in products]
+    parsed_products = []
+    for row in products:
+        payload = json.loads(row["product_data"])
+        payload["extraction_method"] = row.get("extraction_method")
+        payload["extraction_latency"] = row.get("extraction_latency")
+        payload["quality_status"] = row.get("quality_status")
+        payload["quality_notes"] = _load_json_list(row.get("quality_notes"))
+        parsed_products.append(payload)
     
     if not parsed_products:
         print("No products extracted.")

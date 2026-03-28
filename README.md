@@ -59,7 +59,7 @@ This means the current repo treats the API-based approach as the stable baseline
   Runs the final schema-producing extraction path. It also handles repair passes, verification, and focused variation recovery when a page appears valid but the extracted SKU/size rows look incomplete.
 
 - `db.py`
-  Owns persistence for crawl progress and extracted records. It makes the crawl resumable, preserves failure context, and now keeps incomplete structured records alongside completed ones for later review.
+  Owns persistence for crawl progress and extracted records. It makes the crawl resumable, preserves failure context, keeps incomplete structured records alongside completed ones for later review, and stores normalized product/variation fields in SQLite in addition to the JSON payload.
 
 - `main.py`
   Coordinates all of the above: it decides what to fetch, what to queue, what to reject, when to retry, and when a product is good enough to save.
@@ -102,6 +102,7 @@ Optional local-mode direction:
 - keep the API path as the reliable baseline
 - use `USE_HANDYMAN=true` to enable the low-cost helper layer
 - test local inference through the `handyman` path while serving an open-source model via `sglang`
+- local mode always uses the Handyman verifier/fix path, while API mode always uses the API verifier/fix path
 
 ### 4. Run a bounded demo crawl
 
@@ -171,10 +172,18 @@ Typical artifact outputs include:
 - crawl database
 - `products.json`
 - `products.csv`
+- `products_detailed.json`
+- `products_detailed.csv`
 - bounded-run exports such as `scrape_5_products.json`
 - `scraper.log`
 
-The full exports now include both completed and incomplete structured records, with status fields such as `record_status`, `crawl_status`, `crawl_detail`, and `crawl_error` so partial extractions are visible instead of being silently dropped. `products.json` also includes a top-level `skipped_urls` list with each skipped queue URL and its skip reason.
+The clean deliverables are `products.json` and `products.csv`, which contain only the business-facing product fields. The engineering/debug outputs are `products_detailed.json` and `products_detailed.csv`, which include extraction metadata, quality flags, crawl status, and skipped URLs.
+
+The SQLite layer now stores:
+
+- `pages_queue` for crawl state
+- `products` for normalized product-level fields plus the JSON payload
+- `product_variations` for SKU/size/price/package/availability rows
 
 ## Limitations
 

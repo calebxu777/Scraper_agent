@@ -1,6 +1,11 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
+
+class ProductSpecification(BaseModel):
+    name: str = Field(description="Specification or attribute name")
+    value: str = Field(description="Specification or attribute value")
+
 class ProductVariation(BaseModel):
     sku: str = Field(description="SKU, item number, or product code")
     size: Optional[str] = Field(description="Size, gauge, length, or dimension if applicable", default=None)
@@ -13,6 +18,10 @@ class DentalProductExtraction(BaseModel):
     brand: Optional[str] = Field(description="Brand or Manufacturer name", default=None)
     category_hierarchy: List[str] = Field(description="List representing the breadcrumb navigation path or category hierarchy")
     description: str = Field(description="Main description or summary of the product")
+    specifications: List[ProductSpecification] = Field(
+        description="List of explicit product specifications or attributes as name/value pairs",
+        default_factory=list,
+    )
     variations: List[ProductVariation] = Field(description="List of all SKUs/options available for this product")
     image_urls: List[str] = Field(description="List of URLs pointing to product images")
     alternative_products: List[str] = Field(description="List of related/alternative products (text or SKUs) suggested on the page", default_factory=list)

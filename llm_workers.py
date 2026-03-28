@@ -125,7 +125,7 @@ async def api_recover_variations(cleaned_markdown: str, current_product: DentalP
 async def api_verify_product(cleaned_markdown: str, product: DentalProduct) -> "HandymanVerifyResult":
     """
     Uses GPT-4o-mini to validate extracted product data against page text.
-    Used when USE_HANDYMAN=false but USE_HANDYMAN_VERIFY=true.
+    Used as the API-mode verifier.
     """
     from models import HandymanVerifyResult
     from prompts import VALIDATOR_PROMPT
