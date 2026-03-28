@@ -4,6 +4,11 @@
 __pycache__/
 *.pyc
 scraper.log
+*.log
+*.db
 crawl_state.db
 artifacts/
+artifacts_api/
+artifacts_handyman/
 .streamlit/
+error.txt

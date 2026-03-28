@@ -6,7 +6,7 @@ class ProductVariation(BaseModel):
     size: Optional[str] = Field(description="Size, gauge, length, or dimension if applicable", default=None)
     package_count: Optional[str] = Field(description="Quantity per box/pack (e.g., 'Box of 100')", default=None)
     price: Optional[float] = Field(description="Price as a float. Null if not available.", default=None)
-    availability: Optional[bool] = Field(description="True if in stock, False if backordered or out of stock", default=True)
+    availability: Optional[bool] = Field(description="True if in stock, False if backordered or out of stock", default=None)
 
 class DentalProductExtraction(BaseModel):
     product_name: str = Field(description="Name of the product")
@@ -19,6 +19,10 @@ class DentalProductExtraction(BaseModel):
 
 class DentalProduct(DentalProductExtraction):
     source_url: str = Field(description="The Safco URL where this product was found")
+    extraction_method: str = Field(description="The backend model used to extract the unstructured data into JSON", default="unknown")
+    extraction_latency: float = Field(description="Seconds it took to extract the structured JSON payload", default=0.0)
+    quality_status: str = Field(description="One of complete or incomplete", default="complete")
+    quality_notes: List[str] = Field(description="Known extraction-quality issues for this product", default_factory=list)
 
 
 class HandymanRouteDecision(BaseModel):

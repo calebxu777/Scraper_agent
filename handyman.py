@@ -1,27 +1,26 @@
 import json
+import logging
 import os
 import re
 from typing import Any
 
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from classifier import looks_like_product_page
-from models import DentalProduct, HandymanRouteDecision, HandymanVerifyResult
+from models import DentalProduct, DentalProductExtraction, HandymanRouteDecision, HandymanVerifyResult
+from prompts import EXTRACTOR_PROMPT, PRUNER_PROMPT, ROUTER_PROMPT, VALIDATOR_PROMPT, FIXER_PROMPT
 
 load_dotenv()
 
-USE_HANDYMAN = os.getenv("USE_HANDYMAN", "true").lower() == "true"
-HANDYMAN_BACKEND = os.getenv("HANDYMAN_BACKEND", "rules")
-HANDYMAN_MODEL = os.getenv("HANDYMAN_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
-HANDYMAN_DEVICE = os.getenv("HANDYMAN_DEVICE", "cuda")
-HANDYMAN_DTYPE = os.getenv("HANDYMAN_DTYPE", "auto")
-HANDYMAN_MAX_NEW_TOKENS = int(os.getenv("HANDYMAN_MAX_NEW_TOKENS", "384"))
-HANDYMAN_TEMPERATURE = float(os.getenv("HANDYMAN_TEMPERATURE", "0.0"))
+HANDYMAN_BACKEND = os.getenv("HANDYMAN_BACKEND", "sglang")
+HANDYMAN_MODEL = os.getenv("HANDYMAN_MODEL", "qwen3.5:0.8b")
 USE_RULE_ROUTER = os.getenv("USE_RULE_ROUTER", "true").lower() == "true"
-USE_HANDYMAN_VERIFY = os.getenv("USE_HANDYMAN_VERIFY", "true").lower() == "true"
 
-_GENERATOR = None
-_GENERATOR_ERROR = None
+
+def _env_flag(name: str, default: str) -> bool:
+    return os.getenv(name, default).lower() == "true"
+
 
 NOISE_PATTERNS = [
     r"(?im)^.*(privacy policy|terms of use|terms and conditions).*$",
@@ -34,11 +33,11 @@ NOISE_PATTERNS = [
 
 
 def is_handyman_enabled() -> bool:
-    return USE_HANDYMAN
+    return _env_flag("USE_HANDYMAN", "true")
 
 
 def is_verify_enabled() -> bool:
-    return USE_HANDYMAN and USE_HANDYMAN_VERIFY
+    return is_handyman_enabled() and _env_flag("USE_HANDYMAN_VERIFY", "true")
 
 
 def _collapse_blank_lines(text: str) -> str:
@@ -70,60 +69,63 @@ def rules_prune(markdown_text: str) -> str:
     return _collapse_blank_lines("\n".join(lines))
 
 
-def _load_generator():
-    global _GENERATOR, _GENERATOR_ERROR
-    if _GENERATOR is not None or _GENERATOR_ERROR is not None:
-        return _GENERATOR
+# Schema for pruner (no Pydantic model, just a simple one-key object)
+PRUNER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "cleaned_markdown": {"type": "string"}
+    },
+    "required": ["cleaned_markdown"]
+}
 
-    try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-    except Exception as exc:
-        _GENERATOR_ERROR = f"transformers import failed: {exc}"
+
+async def _generate_json(prompt: str, schema: dict | type[BaseModel] | None = None) -> dict[str, Any] | None:
+    """Generate JSON from SGLang with optional Compressed FSM constrained decoding.
+    
+    If a Pydantic model or raw JSON schema dict is provided, SGLang's XGrammar
+    backend compiles it into a Compressed Finite State Machine. This guarantees
+    structurally valid output and enables jump-forward decoding over boilerplate
+    tokens for significant speed gains.
+    """
+    if HANDYMAN_BACKEND != "sglang":
         return None
 
-    model_kwargs: dict[str, Any] = {}
-    if HANDYMAN_DTYPE != "auto":
-        model_kwargs["torch_dtype"] = HANDYMAN_DTYPE
-
     try:
-        tokenizer = AutoTokenizer.from_pretrained(HANDYMAN_MODEL)
-        model = AutoModelForCausalLM.from_pretrained(
-            HANDYMAN_MODEL,
-            device_map=HANDYMAN_DEVICE if HANDYMAN_DEVICE != "auto" else "auto",
-            **model_kwargs,
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(base_url="http://localhost:30000/v1", api_key="EMPTY")
+
+        # Build the JSON schema for constrained decoding
+        if schema is not None:
+            if isinstance(schema, type) and issubclass(schema, BaseModel):
+                json_schema = schema.model_json_schema()
+            else:
+                json_schema = schema
+            extra_body = {"json_schema": json.dumps(json_schema)}
+        else:
+            extra_body = None
+
+        response = await client.chat.completions.create(
+            model=HANDYMAN_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=1500,
+            response_format={"type": "json_object"},
+            extra_body=extra_body,
         )
-        _GENERATOR = pipeline("text-generation", model=model, tokenizer=tokenizer)
-        return _GENERATOR
-    except Exception as exc:
-        _GENERATOR_ERROR = f"local model load failed: {exc}"
-        return None
-
-
-def _generate_json(prompt: str) -> dict[str, Any] | None:
-    if HANDYMAN_BACKEND != "local_llm":
-        return None
-
-    generator = _load_generator()
-    if generator is None:
-        return None
-
-    try:
-        outputs = generator(
-            prompt,
-            max_new_tokens=HANDYMAN_MAX_NEW_TOKENS,
-            temperature=HANDYMAN_TEMPERATURE,
-            return_full_text=False,
-        )
-        text = outputs[0]["generated_text"].strip()
+        text = response.choices[0].message.content.strip()
+        logging.info(f"🤖 [SGLang Handyman Thought]:\n{text}")
+        
+        # With FSM the output is guaranteed valid, but keep fallback for safety
         match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            return None
-        return json.loads(match.group(0))
-    except Exception:
+        if match:
+            return json.loads(match.group(0))
+        return json.loads(text)
+    except Exception as exc:
+        print(f"Handyman generation failed: {exc}")
         return None
 
 
-def handyman_route(url: str, markdown_text: str) -> HandymanRouteDecision:
+async def handyman_route(url: str, markdown_text: str) -> HandymanRouteDecision:
     if USE_RULE_ROUTER:
         heuristic = looks_like_product_page(url, markdown_text)
         if heuristic.is_product:
@@ -138,16 +140,16 @@ def handyman_route(url: str, markdown_text: str) -> HandymanRouteDecision:
                 confidence=min(0.95, 0.55 + (0.08 * max(heuristic.category_score, 1))),
                 reason=heuristic.reason,
             )
-        if HANDYMAN_BACKEND != "local_llm":
+        if HANDYMAN_BACKEND != "sglang":
             return baseline
     else:
         baseline = HandymanRouteDecision(label="uncertain", confidence=0.5, reason="rules router disabled")
 
-    payload = _generate_json(
-        "Classify this Safco page as product, category, other, or uncertain. "
-        "Return strict JSON with keys label, confidence, reason.\n"
+    payload = await _generate_json(
+        f"{ROUTER_PROMPT}\n"
         f"URL: {url}\n"
-        f"PAGE:\n{markdown_text[:6000]}"
+        f"PAGE:\n{markdown_text[:6000]}",
+        schema=HandymanRouteDecision,
     )
     if payload is None:
         return baseline
@@ -161,16 +163,16 @@ def handyman_route(url: str, markdown_text: str) -> HandymanRouteDecision:
         return baseline
 
 
-def handyman_prune(url: str, markdown_text: str) -> str:
+async def handyman_prune(url: str, markdown_text: str) -> str:
     cleaned = rules_prune(markdown_text)
-    if HANDYMAN_BACKEND != "local_llm":
+    if HANDYMAN_BACKEND != "sglang":
         return cleaned
 
-    payload = _generate_json(
-        "Clean this scraped markdown while preserving all product facts. "
-        "Return strict JSON with one key cleaned_markdown.\n"
+    payload = await _generate_json(
+        f"{PRUNER_PROMPT}\n"
         f"URL: {url}\n"
-        f"PAGE:\n{cleaned[:6000]}"
+        f"PAGE:\n{cleaned[:6000]}",
+        schema=PRUNER_SCHEMA,
     )
     if payload is None:
         return cleaned
@@ -181,22 +183,49 @@ def handyman_prune(url: str, markdown_text: str) -> str:
     return cleaned
 
 
-def handyman_verify_extraction(url: str, markdown_text: str, product: DentalProduct) -> HandymanVerifyResult:
+async def handyman_extract(url: str, markdown_text: str) -> DentalProduct | None:
+    if HANDYMAN_BACKEND != "sglang":
+        return None
+
+    payload = await _generate_json(
+        f"{EXTRACTOR_PROMPT}\n"
+        f"URL: {url}\n"
+        f"PAGE:\n{markdown_text[:6000]}",
+        schema=DentalProductExtraction,
+    )
+    if payload is None:
+        return None
+
+    try:
+        product = DentalProduct.model_validate({
+            **payload,
+            "source_url": url,
+            "extraction_method": "local_qwen"
+        })
+        return product
+    except Exception as exc:
+        logging.warning(f"Handyman extraction failed validation for {url}: {exc}")
+        return None
+
+
+async def handyman_verify_extraction(url: str, markdown_text: str, product: DentalProduct) -> HandymanVerifyResult:
     page = (markdown_text or "").lower()
     issues: list[str] = []
 
     if product.product_name and product.product_name.lower() not in page:
-        issues.append("product_name not directly found in page text")
-    if not product.variations:
-        issues.append("no variations extracted")
-    if not product.image_urls:
-        issues.append("no image urls extracted")
+        issues.append("product_name not directly found in page text (possible hallucination)")
     if not product.category_hierarchy:
         issues.append("missing category hierarchy")
 
+    # Check for hallucinated SKUs (hard signal — SKU should appear on page)
     for variation in product.variations:
         if variation.sku and variation.sku.lower() not in page:
-            issues.append(f"sku {variation.sku} not directly found in page text")
+            issues.append(f"sku {variation.sku} not found in page text (possible hallucination)")
+
+    # Check for duplicate/repeated values (structural error)
+    for field_name, field_val in [("category_hierarchy", product.category_hierarchy), ("alternative_products", product.alternative_products)]:
+        if len(field_val) != len(set(field_val)):
+            issues.append(f"repeated duplicate values in {field_name}")
 
     if issues:
         baseline = HandymanVerifyResult(
@@ -213,16 +242,15 @@ def handyman_verify_extraction(url: str, markdown_text: str, product: DentalProd
             notes="rule-based verification found support for key product fields",
         )
 
-    if HANDYMAN_BACKEND != "local_llm":
+    if HANDYMAN_BACKEND != "sglang":
         return baseline
 
-    payload = _generate_json(
-        "Compare this extracted product JSON against the page text. "
-        "Return strict JSON with keys decision, confidence, issues, notes. "
-        "Decision must be pass, warn, or fail.\n"
+    payload = await _generate_json(
+        f"{VALIDATOR_PROMPT}\n"
         f"URL: {url}\n"
         f"PAGE:\n{markdown_text[:5000]}\n"
-        f"EXTRACTED_JSON:\n{product.model_dump_json(indent=2)}"
+        f"EXTRACTED_JSON:\n{product.model_dump_json(indent=2)}",
+        schema=HandymanVerifyResult,
     )
     if payload is None:
         return baseline
@@ -236,10 +264,39 @@ def handyman_verify_extraction(url: str, markdown_text: str, product: DentalProd
         return baseline
 
 
-def handyman_backend_status() -> str:
-    if HANDYMAN_BACKEND != "local_llm":
-        return "rules"
-    _load_generator()
-    if _GENERATOR_ERROR:
-        return f"rules_fallback ({_GENERATOR_ERROR})"
-    return "local_llm"
+async def handyman_fix(url: str, markdown_text: str, current_data: DentalProduct, issues: list[str]) -> DentalProduct | None:
+    if HANDYMAN_BACKEND != "sglang":
+        return None
+        
+    prompt = (
+        f"{FIXER_PROMPT}\n"
+        f"URL: {url}\n"
+        f"ISSUES IDENTIFIED BY VALIDATOR:\n"
+        f"{' | '.join(issues)}\n\n"
+        f"PREVIOUS BROKEN EXTRACTION:\n"
+        f"{current_data.model_dump_json(indent=2)}\n\n"
+        f"ORIGINAL MARKDOWN:\n"
+        f"{markdown_text[:6000]}"
+    )
+    
+    payload = await _generate_json(prompt, schema=DentalProductExtraction)
+    if payload is None:
+        return None
+        
+    try:
+        from pydantic import ValidationError
+        product = DentalProduct.model_validate({
+            **payload,
+            "source_url": url,
+            "extraction_method": "local_qwen_fixed"
+        })
+        return product
+    except ValidationError as exc:
+        logging.warning(f"Handyman fix hallucinated invalid schema for {url}: {exc}")
+        return None
+
+
+async def handyman_backend_status() -> str:
+    if HANDYMAN_BACKEND == "sglang":
+        return f"sglang ({HANDYMAN_MODEL})"
+    return "rules"

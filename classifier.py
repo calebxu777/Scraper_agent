@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,35 @@ class ClassificationResult:
 def looks_like_product_page(url: str, markdown_text: str) -> ClassificationResult:
     text = (markdown_text or "").lower()
     url_text = (url or "").lower()
+    path = urlparse(url_text).path
+
+    hard_other_patterns = (
+        "/privacy-policy",
+        "/sitemap",
+        "/about-us",
+        "/blog",
+        "/shop-by-manufacturer",
+        "/catalog/product_compare",
+    )
+    hard_category_patterns = (
+        "/catalog/category/view/",
+    )
+
+    if any(pattern in path for pattern in hard_other_patterns):
+        return ClassificationResult(
+            is_product=False,
+            reason="skipped due to hard non-product url pattern",
+            product_score=0,
+            category_score=3,
+        )
+
+    if any(pattern in path for pattern in hard_category_patterns):
+        return ClassificationResult(
+            is_product=False,
+            reason="skipped due to category-listing url pattern",
+            product_score=0,
+            category_score=3,
+        )
 
     product_signals = {
         "has_price": bool(re.search(r"\$\s?\d", markdown_text or "")),
@@ -34,6 +64,19 @@ def looks_like_product_page(url: str, markdown_text: str) -> ClassificationResul
 
     product_score = sum(product_signals.values())
     category_score = sum(category_signals.values())
+
+    # Catalog pages need stronger evidence before we treat them as single-product detail pages.
+    if "/catalog/" in path and "/product/" not in path and "/item/" not in path:
+        if category_score >= 2 or not product_signals["has_sku"]:
+            reasons = [name for name, matched in category_signals.items() if matched]
+            if not reasons:
+                reasons = ["catalog url without strong product-detail signals"]
+            return ClassificationResult(
+                is_product=False,
+                reason=f"skipped due to {', '.join(reasons[:3])}",
+                product_score=product_score,
+                category_score=max(category_score, 2),
+            )
 
     if product_score >= 2 and product_score > category_score:
         reasons = [name for name, matched in product_signals.items() if matched]

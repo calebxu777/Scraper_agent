@@ -33,6 +33,26 @@ class ClassifierTests(unittest.TestCase):
         self.assertFalse(result.is_product)
         self.assertGreaterEqual(result.category_score, 2)
 
+    def test_rejects_compare_utility_url(self):
+        markdown = """
+        Products Comparison List
+        You have no items to compare.
+        """
+        result = looks_like_product_page("https://www.safcodental.com/catalog/product_compare/index", markdown)
+        self.assertFalse(result.is_product)
+
+    def test_rejects_catalog_category_view_listing(self):
+        markdown = """
+        Rubber Dam
+        Filter By
+        15 results
+        Add to Cart
+        Add to Cart
+        Add to Cart
+        """
+        result = looks_like_product_page("https://www.safcodental.com/catalog/category/view/s/rubber-dam/id/913", markdown)
+        self.assertFalse(result.is_product)
+
 
 if __name__ == "__main__":
     unittest.main()

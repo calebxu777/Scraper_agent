@@ -1,13 +1,15 @@
 import json
 import os
+import sqlite3
 
 import pandas as pd
 import streamlit as st
 
-from db import count_products, get_connection, get_queue_counts
-
-
 st.set_page_config(page_title="Safco Scraper Dashboard", layout="wide")
+
+
+def get_connection():
+    return sqlite3.connect(os.getenv("CRAWL_DB_PATH", "crawl_state.db"))
 
 
 @st.cache_data(ttl=5)
@@ -38,6 +40,18 @@ def load_products(limit: int = 200) -> pd.DataFrame:
     return df
 
 
+def get_dashboard_counts():
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM products")
+    product_count = c.fetchone()[0]
+    
+    c.execute("SELECT status, COUNT(*) as count FROM pages_queue GROUP BY status")
+    counts = {r[0]: r[1] for r in c.fetchall()}
+    conn.close()
+    return product_count, counts
+
+
 def parse_product_rows(products_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, row in products_df.iterrows():
@@ -56,7 +70,7 @@ def parse_product_rows(products_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_metric_cards():
-    counts = get_queue_counts()
+    product_count, counts = get_dashboard_counts()
     total_urls = sum(counts.values())
     completed = counts.get("COMPLETED", 0)
     failed = counts.get("FAILED", 0)
@@ -67,7 +81,7 @@ def render_metric_cards():
     percent_complete = (done / total_urls * 100) if total_urls else 0.0
 
     metric_columns = st.columns(6)
-    metric_columns[0].metric("Products", count_products())
+    metric_columns[0].metric("Products", product_count)
     metric_columns[1].metric("Total URLs", total_urls)
     metric_columns[2].metric("Completed %", f"{percent_complete:.1f}%")
     metric_columns[3].metric("Pending", pending)

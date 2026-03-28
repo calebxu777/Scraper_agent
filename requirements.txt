@@ -1,4 +1,5 @@
 httpx
+playwright
 beautifulsoup4
 markdownify
 pydantic
@@ -6,6 +7,6 @@ tenacity
 python-dotenv
 openai
 pandas
-transformers
+aiosqlite
 tqdm
 streamlit
