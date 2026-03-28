@@ -1,0 +1,26 @@
+{
+  "product_name": "SurgiSuture Chromic Gut",
+  "brand": "Example Dental",
+  "category_hierarchy": [
+    "Sutures & Surgical Products",
+    "Absorbable Sutures"
+  ],
+  "description": "Absorbable chromic gut suture for oral surgical procedures.",
+  "variations": [
+    {
+      "sku": "12-345",
+      "size": "4-0, 18 in",
+      "package_count": "Box of 12",
+      "price": 29.99,
+      "availability": true
+    }
+  ],
+  "image_urls": [
+    "https://www.safcodental.com/images/products/chromic-gut.jpg"
+  ],
+  "alternative_products": [
+    "Plain Gut 4-0",
+    "Vicryl Rapide 4-0"
+  ],
+  "source_url": "https://www.safcodental.com/item/surgisuture-chromic-gut"
+}

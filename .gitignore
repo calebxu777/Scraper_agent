@@ -1,0 +1,9 @@
+.env
+.conda-env/
+.venv/
+__pycache__/
+*.pyc
+scraper.log
+crawl_state.db
+artifacts/
+.streamlit/
